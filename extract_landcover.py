@@ -27,19 +27,22 @@ landcover_schemes = {
     'PFT': 'LC_Type5'
 }
 
-def read_landcover_from_hdf(hdf_path):
+# location for the original land cover datafiles
+input_directory = f'../data/LandCover/'
+
+
+def read_landcover_from_hdf(hdf_path, scheme):
     '''Extract land cover data and metadata from a MODIS HDF4 file.'''
     sd = SD(hdf_path, SDC.READ)
-    dataset = sd.select("LC_Type1")
+    dataset = sd.select(landcover_schemes[scheme]) 
     return dataset[:]
 
 def get_mosaic_files(year):
     '''Gets all files for a given year.'''
-    directory = f"Original/"
-    start_filename = f"MCD12Q1.A{year}"
-    return sorted([os.path.join(directory, f) for f in os.listdir(directory) if f.startswith(start_filename) and f.endswith('.hdf')])
+    start_filename = f'MCD12Q1.A{year}'
+    return sorted([os.path.join(input_directory, f) for f in os.listdir(input_directory) if f.startswith(start_filename) and f.endswith('.hdf')])
 
-def construct_global_map(year):
+def construct_global_map(year, scheme):
     '''Mosaic MODIS tiles and save as a compressed GeoTIFF.'''
 
     # get list of all the files for the desired year
@@ -50,12 +53,12 @@ def construct_global_map(year):
 
     for filename in filenames:
 
-        itile_x = int(filename.split('.')[2][1:3])
-        itile_y = int(filename.split('.')[2][4:6])
+        filename_temp = filename.replace(input_directory, '')
 
-        # print(f"Processing tile {itile_x}, {itile_y} from {filename}")
+        itile_x = int(filename_temp.split('.')[2][1:3])
+        itile_y = int(filename_temp.split('.')[2][4:6])
 
-        data_tile = read_landcover_from_hdf(filename)
+        data_tile = read_landcover_from_hdf(filename, scheme)
 
         ipixel_x = itile_x * npixels_per_tile_x
         ipixel_y = itile_y * npixels_per_tile_y
@@ -70,8 +73,12 @@ def generate_year_map(year, scheme):
     # make the map
     global_map = construct_global_map(year, scheme)
 
+    # create output directory if it doesn't exist
+    outputdir = f'../output/landcover/{scheme}/'
+    os.makedirs(outputdir, exist_ok=True)
+
     # save the monthly average map
-    output_filename = f"landcover_{year}.tif"
+    output_filename = os.path.join(outputdir, f'landcover_{year}.tif')
     out_meta = {
         "driver": "GTiff",
         "height": global_map.shape[0],
@@ -86,7 +93,13 @@ def generate_year_map(year, scheme):
     with rasterio.open(output_filename, "w", **out_meta) as dest:
         dest.write(global_map, 1)
 
-def extract_landcover(scheme='UMD'):
-    for year in range(2002, 2003):
-        generate_year_map(year, scheme)
+def extract_landcover(scheme='UMD', year=None):
+    '''Main function for extracting land cover maps'''
 
+    if year is not None:
+        generate_year_map(year, scheme)
+    else:
+        for year in range(2001, 2025):
+            generate_year_map(year, scheme)
+
+extract_landcover(scheme='IGBP')
