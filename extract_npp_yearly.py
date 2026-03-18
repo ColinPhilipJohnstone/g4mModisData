@@ -21,7 +21,7 @@ ORIGIN_Y = 10007554.677
 
 # location for the original land cover datafiles
 input_directory = f'../data/NPP/'
-output_directory = f'../output/npp_yearly/'
+output_directory_main = f'../output/'
 
 def get_mosaic_files(year, startday):
     '''Gets all files for a given year and 8-day period
@@ -45,12 +45,20 @@ def get_mosaic_files(year, startday):
 
     return sorted([os.path.join(directory, f) for f in os.listdir(directory) if f.startswith(start_filename) and f.endswith('.hdf')])
 
-def read_npp_from_hdf(hdf_path):
+def read_npp_from_hdf(hdf_path, quantity):
     '''Extract NPP data and metadata from a MODIS HDF4 file.'''
+
+    # the variable to extract from the files
+    if quantity == 'npp':
+        variable_name = "PsnNet_500m"
+    elif quantity == 'gpp':
+        variable_name = "Gpp_500m"
+    else:
+        raise ValueError(f"Unsupported quantity: {quantity}")
 
     # read the file and extract some data
     sd = SD(hdf_path, SDC.READ)
-    dataset = sd.select("PsnNet_500m")
+    dataset = sd.select(variable_name)
     attrs = dataset.attributes()
     scale = attrs.get("scale_factor", 0.1)
     fill = attrs.get("_FillValue", -3000)
@@ -64,7 +72,7 @@ def read_npp_from_hdf(hdf_path):
 
     return data
 
-def construct_global_map(year, startday):
+def construct_global_map(year, startday, quantity):
     '''Mosaic MODIS tiles and save as a compressed GeoTIFF.'''
 
     filenames = get_mosaic_files(year, startday)
@@ -73,19 +81,27 @@ def construct_global_map(year, startday):
         filename_temp = filename.replace(input_directory, '')
         itile_x = int(filename_temp.split('.')[2][1:3])
         itile_y = int(filename_temp.split('.')[2][4:6])
-        data_tile = read_npp_from_hdf(filename)
+        data_tile = read_npp_from_hdf(filename, quantity)
         ipixel_x = itile_x * npixels_per_tile_x
         ipixel_y = itile_y * npixels_per_tile_y
         global_map[ipixel_y:ipixel_y + npixels_per_tile_y, ipixel_x:ipixel_x + npixels_per_tile_x] = data_tile
     
     return global_map
 
-def prepare_yearly_average(year):
+def prepare_yearly_average(year, quantity='npp'):
     '''Prepares global maps of yearly average NPP data for a given year.'''
     
     # check year is provided
     if year is None:
         raise ValueError("Year must be specified for yearly average preparation.")
+    
+    # get the output directory for the quantity
+    if quantity == 'npp':
+        output_directory = os.path.join(output_directory_main, 'npp_yearly/')
+    elif quantity == 'gpp':
+        output_directory = os.path.join(output_directory_main, 'gpp_yearly/')
+    else:
+        raise ValueError(f"Unsupported quantity: {quantity}")
 
     # make the output direcotory if it doesn't exist
     os.makedirs(output_directory, exist_ok=True)
@@ -102,7 +118,7 @@ def prepare_yearly_average(year):
     for startday in startdays:
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing year {year}, start day {startday}...")
 
-        global_maps_8days = construct_global_map(year, startday)
+        global_maps_8days = construct_global_map(year, startday, quantity)
         if global_map is None:
             global_map = global_maps_8days
         else:
@@ -112,7 +128,7 @@ def prepare_yearly_average(year):
     global_map /= len(startdays)
 
     # save the yearly average map
-    output_filename = os.path.join(output_directory, f"npp_{year}.tif")
+    output_filename = os.path.join(output_directory, f"{quantity}_{year}.tif")
     out_meta = {
         "driver": "GTiff",
         "height": global_map.shape[0],
@@ -127,4 +143,4 @@ def prepare_yearly_average(year):
     with rasterio.open(output_filename, "w", **out_meta) as dest:
         dest.write(global_map, 1)
 
-prepare_yearly_average(2000)
+prepare_yearly_average(2001, quantity='gpp')
