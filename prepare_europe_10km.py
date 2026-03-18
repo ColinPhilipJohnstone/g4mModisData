@@ -214,9 +214,6 @@ def compare_neumann():
         with rasterio.open(f'../output/Europe_10km_2/reprojected/forest_npp_{year}.tif') as src:
             data = src.read(1)
 
-        # data *= 0.47
-
-
         fig, axes = plt.subplots(1, 4, figsize=(20, 4))
 
         # Map 1: Neumann data
