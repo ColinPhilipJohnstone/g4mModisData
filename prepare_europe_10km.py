@@ -263,28 +263,28 @@ def setup_europe_10km():
     os.makedirs(outputdir, exist_ok=True)
 
     # the years to prepare
-    years = range(2001, 2002)
+    years = range(2002, 2017)
 
     #-----------------------------------------
     # CROPPING
 
     # crop the landcover maps
-    # outputdir2 = f'{outputdir}landcover_cropped/'
-    # os.makedirs(outputdir2, exist_ok=True)
-    # for year in years:
-    #     _print(f"Cropping land cover map for {year}...")
-    #     input_tif = f'../output/landcover/UMD/landcover_{year}.tif'
-    #     output_tif = f'{outputdir2}landcover_{year}.tif'
-    #     crop_modis_europe(input_tif, output_tif)
+    outputdir2 = f'{outputdir}landcover_cropped/'
+    os.makedirs(outputdir2, exist_ok=True)
+    for year in years:
+        _print(f"Cropping land cover map for {year}...")
+        input_tif = f'../output/landcover/UMD/landcover_{year}.tif'
+        output_tif = f'{outputdir2}landcover_{year}.tif'
+        crop_modis_europe(input_tif, output_tif)
 
     # crop the yearly NPP maps
-    # outputdir2 = f'{outputdir}npp_yearly_cropped/'
-    # os.makedirs(outputdir2, exist_ok=True)
-    # for year in years:
-    #     _print(f"Cropping NPP map for {year}...")
-    #     input_tif = f'../output/npp_yearly/npp_{year}.tif'
-    #     output_tif = f'{outputdir2}npp_{year}.tif'
-    #     crop_modis_europe(input_tif, output_tif)
+    outputdir2 = f'{outputdir}npp_yearly_cropped/'
+    os.makedirs(outputdir2, exist_ok=True)
+    for year in years:
+        _print(f"Cropping NPP map for {year}...")
+        input_tif = f'../output/npp_yearly/npp_{year}.tif'
+        output_tif = f'{outputdir2}npp_{year}.tif'
+        crop_modis_europe(input_tif, output_tif)
 
     # crops the monthly maps
     outputdir2 = f'{outputdir}npp_monthly_cropped/'
@@ -301,24 +301,24 @@ def setup_europe_10km():
     #-----------------------------------------
     # MAKE MASKS
 
-    # outputdir2 = f'{outputdir}land_cover_masks/'
-    # os.makedirs(outputdir2, exist_ok=True)
-    # for year in years:
-    #     input_tif = f'{outputdir}landcover_cropped/landcover_{year}.tif'
-    #     make_masks(input_tif, outputdir2, year)
+    outputdir2 = f'{outputdir}land_cover_masks/'
+    os.makedirs(outputdir2, exist_ok=True)
+    for year in years:
+        input_tif = f'{outputdir}landcover_cropped/landcover_{year}.tif'
+        make_masks(input_tif, outputdir2, year)
 
     #-----------------------------------------
     # AGGREGATE TO 10KM
 
     # yearly
-    # outputdir2 = f'{outputdir}aggregated/'
-    # os.makedirs(outputdir2, exist_ok=True)
-    # for year in years:
-    #     input_tif_mask = f'{outputdir}land_cover_masks/mask_forest_{year}.tif'
-    #     input_tif_npp = f'{outputdir}npp_yearly_cropped/npp_{year}.tif'
-    #     output_tif_area = f'{outputdir2}forest_area_{year}.tif'
-    #     output_tif_npp = f'{outputdir2}forest_npp_{year}.tif'
-    #     aggregate_maps(input_tif_mask, input_tif_npp, output_tif_area, output_tif_npp)
+    outputdir2 = f'{outputdir}aggregated/'
+    os.makedirs(outputdir2, exist_ok=True)
+    for year in years:
+        input_tif_mask = f'{outputdir}land_cover_masks/mask_forest_{year}.tif'
+        input_tif_npp = f'{outputdir}npp_yearly_cropped/npp_{year}.tif'
+        output_tif_area = f'{outputdir2}forest_area_{year}.tif'
+        output_tif_npp = f'{outputdir2}forest_npp_{year}.tif'
+        aggregate_maps(input_tif_mask, input_tif_npp, output_tif_area, output_tif_npp)
 
     # monthly
     outputdir2 = f'{outputdir}aggregated_monthly/'
@@ -337,12 +337,12 @@ def setup_europe_10km():
     # REPROJECT
 
     # yearly
-    # outputdir2 = f'{outputdir}reprojected/'
-    # os.makedirs(outputdir2, exist_ok=True)
-    # for year in years:
-    #     input_tif = f'{outputdir}aggregated/forest_npp_{year}.tif'
-    #     output_tif = f'{outputdir2}forest_npp_{year}.tif'
-    #     reproject_maps(input_tif, output_tif)
+    outputdir2 = f'{outputdir}reprojected/'
+    os.makedirs(outputdir2, exist_ok=True)
+    for year in years:
+        input_tif = f'{outputdir}aggregated/forest_npp_{year}.tif'
+        output_tif = f'{outputdir2}forest_npp_{year}.tif'
+        reproject_maps(input_tif, output_tif)
 
     # monthly
     outputdir2 = f'{outputdir}reprojected_monthly/'
