@@ -1,380 +1,575 @@
+'''
+User manual:
+This script extracts maps of land cover, NPP, LAI, and FPAR for a specified country
+from MODIS data and saves the output as GeoTIFF files and CSV spreadsheets.
 
-'''This code extracts maps of land use, npp, lai, and fpar for a specified country and outputs them as GeoTIFFs and excel files.'''
+Memory-safe rewrite:
+  - Does NOT allocate full global MODIS arrays.
+  - Does NOT mask full global maps with np.where.
+  - Reads only the MODIS tiles/windows overlapping the selected country.
+  - Reads only cropped latitude/longitude windows.
 
-import os
-import numpy as np
-from pyhdf.SD import SD, SDC
-import rasterio
-from rasterio.transform import from_origin
-from rasterio.merge import merge
-import gc
-from datetime import datetime
-import matplotlib.pyplot as plt
+Usage:
+  python extract_country_maps_memory_safe.py --country <CountryName> --yearstart <StartYear> --yearend <EndYear> [--onjupyter]
+
+Example:
+  python extract_country_maps_memory_safe.py --country Kenya --yearstart 2003 --yearend 2010
+'''
+
+import argparse
 import csv
+import gc
+import os
+from datetime import datetime
+
+import numpy as np
 import pandas as pd
+import rasterio
+from pyhdf.SD import SD, SDC
+from rasterio.windows import Window
 
-# Country to extract
-country = 'Sweden'
 
-# Define tile size and resolution (MODIS 500m)
+# --------------------------------------------------------------------------------
+# CLI
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Extract country-level MODIS land cover, NPP, LAI, and FPAR maps."
+    )
+    parser.add_argument("--country", type=str, required=True, help="Country name")
+    parser.add_argument("--yearstart", type=int, required=True, help="Start year")
+    parser.add_argument("--yearend", type=int, required=True, help="End year")
+    parser.add_argument("--onjupyter", action="store_true", help="Use Jupyter/P-drive paths")
+
+    args = parser.parse_args()
+    if args.yearstart > args.yearend:
+        parser.error("yearstart must be less than or equal to yearend")
+    return args
+
+
+args = parse_args()
+
+print("Parameters received:")
+print(f"Country   : {args.country}")
+print(f"Year start: {args.yearstart}")
+print(f"Year end  : {args.yearend}")
+print(f"OnJupyter : {args.onjupyter}")
+
+country = args.country
+yearstart = args.yearstart
+yearend = args.yearend
+
+if args.onjupyter:
+    main_dir = "/pdrive/projects/pflam/projects/Global/data/modis/"
+else:
+    main_dir = "../"
+
+
+# --------------------------------------------------------------------------------
+# MODIS grid constants
+
 res = 463.3127165275005  # meters
 ntiles_x = 36
 ntiles_y = 18
 npixels_per_tile_x = 2400
 npixels_per_tile_y = 2400
 
-# MODIS global origin in Sinusoidal projection
 ORIGIN_X = -20015109.354
 ORIGIN_Y = 10007554.677
 
-# files holding country raster and legend
-COUNTRY_RASTER = "../output/country_map/modis_country_map.tif"
-COUNTRY_LEGEND = "../output/country_map/modis_country_legend.csv"
+COUNTRY_RASTER = f"{main_dir}output/country_map/modis_country_map.tif"
+COUNTRY_LEGEND = f"{main_dir}output/country_map/modis_country_legend.csv"
 
-# location for the original land cover datafiles
-input_directory_landcover = f'../data/LandCover/'
-input_directory_npp = f'../data/NPP/'
-input_directory_lai = f'../data/LAI_fpar/'
-input_directory_fpar = f'../data/LAI_fpar/'
-output_directory_main = f'../output/country_maps/'
+input_directory_landcover = f"{main_dir}data/LandCover/"
+input_directory_npp = f"{main_dir}data/NPP/"
+input_directory_lai = f"{main_dir}data/LAI_fpar/"
+input_directory_fpar = f"{main_dir}data/LAI_fpar/"
+output_directory_main = f"{main_dir}output/country_maps/"
+
+
+# --------------------------------------------------------------------------------
+# Helpers
 
 def _print(msg):
-    '''Print a message with a timestamp.'''
+    """Print a message with a timestamp."""
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 
-def get_mosaic_files(year, startday, quantity):
-    '''Gets all files for a given year and 8-day period
-    
-    Parameters
-    ----------
-    year : int
-        The year of the MODIS data.
-    startday : int
-        The starting day of the 8-day period.
-    quantity : str
-        The quantity to extract (e.g. 'LandCover', 'NPP', 'LAI', 'FPAR').'''
-    
-    # directory is just the year
-    if quantity == 'LandCover':
-        directory = input_directory_landcover
-    elif quantity == 'NPP':
-        directory = os.path.join(input_directory_npp, f"{year}/")
-    elif quantity == 'LAI':
-        directory = os.path.join(input_directory_lai, f"{year}/")
-    elif quantity == 'FPAR':
-        directory = os.path.join(input_directory_fpar, f"{year}/")
 
-    # convert integer for starting day to a three character string
-    # e.g. 1 -> '001'
+def get_quantity_directory(quantity, year=None):
+    """Return the input directory for a MODIS quantity."""
+    if quantity == "LandCover":
+        return input_directory_landcover
+    if quantity == "NPP":
+        return os.path.join(input_directory_npp, f"{year}/")
+    if quantity == "LAI":
+        return os.path.join(input_directory_lai, f"{year}/")
+    if quantity == "FPAR":
+        return os.path.join(input_directory_fpar, f"{year}/")
+    raise ValueError(f"Unknown quantity '{quantity}'")
+
+
+def get_mosaic_files(year, startday, quantity):
+    """Get all HDF files for a given year, start day, and quantity."""
+    directory = get_quantity_directory(quantity, year)
+
+    if not os.path.isdir(directory):
+        raise FileNotFoundError(f"Input directory does not exist: {directory}")
+
     startday_str = f"{startday:03d}"
 
-    # get start of filename
-    if quantity == 'LandCover':
+    if quantity == "LandCover":
         start_filename = f"MCD12Q1.A{year}{startday_str}"
-    elif quantity == 'NPP':
+    elif quantity == "NPP":
         start_filename = f"MOD17A2HGF.A{year}{startday_str}"
-    elif quantity == 'LAI':
+    elif quantity in ("LAI", "FPAR"):
         start_filename = f"MCD15A2H.A{year}{startday_str}"
-    elif quantity == 'FPAR':
-        start_filename = f"MCD15A2H.A{year}{startday_str}"
-    
-    return sorted([os.path.join(directory, f) for f in os.listdir(directory) if f.startswith(start_filename) and f.endswith('.hdf')])
-
-def read_data_from_hdf(hdf_path, quantity):
-    '''Extract data and metadata from a MODIS HDF4 file.'''
-
-    # quantity to extract
-    if quantity == 'LandCover':
-        dataset_name = 'LC_Type1'
-    elif quantity == 'NPP':
-        dataset_name = 'Gpp_500m'
-    elif quantity == 'LAI':
-        dataset_name = 'Lai_500m'
-    elif quantity == 'FPAR':
-        dataset_name = 'Fpar_500m'
     else:
         raise ValueError(f"Unknown quantity '{quantity}'")
 
-    # read the file and extract some data
+    return sorted(
+        os.path.join(directory, f)
+        for f in os.listdir(directory)
+        if f.startswith(start_filename) and f.endswith(".hdf")
+    )
+
+
+def parse_tile_from_filename(filename):
+    """Extract MODIS horizontal/vertical tile indices from a filename."""
+    # Example basename part: MOD17A2HGF.A2003001.h21v09.061....hdf
+    tile_code = os.path.basename(filename).split(".")[2]
+    if not (tile_code.startswith("h") and "v" in tile_code):
+        raise ValueError(f"Could not parse tile code from filename: {filename}")
+    itile_x = int(tile_code[1:3])
+    itile_y = int(tile_code[4:6])
+    return itile_x, itile_y
+
+
+def get_files_by_tile(year, startday, quantity):
+    """Return a dictionary mapping (h, v) tile indices to HDF filenames."""
+    files_by_tile = {}
+    for filename in get_mosaic_files(year, startday, quantity):
+        tile = parse_tile_from_filename(filename)
+        files_by_tile[tile] = filename
+    return files_by_tile
+
+
+def get_dataset_name(quantity):
+    """Return the HDF dataset name for a MODIS quantity."""
+    if quantity == "LandCover":
+        return "LC_Type1"
+    if quantity == "NPP":
+        return "Gpp_500m"
+    if quantity == "LAI":
+        return "Lai_500m"
+    if quantity == "FPAR":
+        return "Fpar_500m"
+    raise ValueError(f"Unknown quantity '{quantity}'")
+
+
+def read_data_from_hdf(hdf_path, quantity):
+    """Extract and process one 2400 x 2400 MODIS tile from an HDF4 file."""
+    dataset_name = get_dataset_name(quantity)
+
     sd = SD(hdf_path, SDC.READ)
     dataset = sd.select(dataset_name)
-    attrs = dataset.attributes()
-    scale = attrs.get("scale_factor", 0.1)
-    fill = attrs.get("_FillValue", -3000)
-    data = dataset[:].astype(np.float32)
+    try:
+        attrs = dataset.attributes()
+        scale = attrs.get("scale_factor", 0.1)
+        fill = attrs.get("_FillValue", -3000)
+        data = dataset[:].astype(np.float32, copy=False)
+    finally:
+        # Release HDF handles as early as possible.
+        try:
+            dataset.endaccess()
+        except Exception:
+            pass
+        try:
+            sd.end()
+        except Exception:
+            pass
 
-    # some processing based on the quantity
-    if quantity == 'LandCover':
-        pass
+    if quantity == "LandCover":
+        # Keep class values as float32 so NaN can be used outside the country mask.
+        return data
 
-    elif quantity == 'NPP':
-        
-        # do some processing to get to tC ha^-1 yr^-1
+    if quantity == "NPP":
         data[data == fill] = np.nan
         data *= scale
-        data = np.where(data > 3.0, np.nan, data)
+        data[data > 3.0] = np.nan
         data *= 456.6
-
-        # multiply by conversion factor of 0.47 from 3PG to get NPP from GPP
-        # see just after Eqn. A4 in Forrester & Tang (2016)
         data *= 0.47
+        return data
 
-    elif quantity == 'LAI':
-
-        # set to nan all values above 100 since that is the valid range
-        # https://www.earthdata.nasa.gov/data/catalog/lpcloud-mcd15a2h-061#variables
-        data = np.where(data > 100, np.nan, data)
-
-        # apply scale factor 
+    if quantity == "LAI":
+        data[data > 100] = np.nan
         data *= 0.1
-        
-    elif quantity == 'FPAR':
+        return data
 
-        # set to nan all values above 100 since that is the valid range
-        # https://www.earthdata.nasa.gov/data/catalog/lpcloud-mcd15a2h-061#variables
-        data = np.where(data > 100, np.nan, data)
-
-        # apply scale factor 
+    if quantity == "FPAR":
+        data[data > 100] = np.nan
         data *= 0.01
+        return data
 
-    return data
-
-def construct_global_map(year, startday, required_tiles, quantity):
-    '''Mosaic MODIS tiles and save as a compressed GeoTIFF.'''
-
-    # get the input directory based on the quantity
-    if quantity == 'LandCover':
-        input_directory = input_directory_landcover
-    elif quantity == 'NPP':
-        input_directory = input_directory_npp
-    elif quantity == 'LAI':
-        input_directory = input_directory_lai
-    elif quantity == 'FPAR':
-        input_directory = input_directory_fpar
-
-    filenames = get_mosaic_files(year, startday, quantity)
-    global_map = np.zeros((ntiles_y * npixels_per_tile_y, ntiles_x * npixels_per_tile_x), dtype=np.float32)
-    for filename in filenames:
-        filename_temp = filename.replace(input_directory, '')
-        itile_x = int(filename_temp.split('.')[2][1:3])
-        itile_y = int(filename_temp.split('.')[2][4:6])
-        if (itile_x, itile_y) not in required_tiles:
-            continue
-        data_tile = read_data_from_hdf(filename, quantity)
-        ipixel_x = itile_x * npixels_per_tile_x
-        ipixel_y = itile_y * npixels_per_tile_y
-        global_map[ipixel_y:ipixel_y + npixels_per_tile_y, ipixel_x:ipixel_x + npixels_per_tile_x] = data_tile
-    
-    return global_map
+    raise ValueError(f"Unknown quantity '{quantity}'")
 
 
-def get_required_tiles(country_mask):
-    '''Get the list of tiles required for a given country based on the country mask.
-    
-    Returns a list of (itile_x, itile_y) pairs for tiles that contain at least some unmasked data.'''
-
-    required_tiles = []
-    
-    for itile_y in range(ntiles_y):
-        for itile_x in range(ntiles_x):
-            ipixel_x = itile_x * npixels_per_tile_x
-            ipixel_y = itile_y * npixels_per_tile_y
-            
-            # Extract the tile region from the country mask
-            tile_mask = country_mask[ipixel_y:ipixel_y + npixels_per_tile_y, 
-                                     ipixel_x:ipixel_x + npixels_per_tile_x]
-            
-            # Check if any part of the tile is not masked
-            if np.any(tile_mask):
-                required_tiles.append((itile_x, itile_y))
-    
-    return required_tiles
-
-def make_country_mask():
-    '''Makes a mask on the MODIS global grid for the specified country.'''
-    
-    # get the integer ID for the country from the legend file
-    country_id = None
-    with open(COUNTRY_LEGEND, 'r') as f:
+def get_country_id():
+    """Look up the integer country ID in the country legend CSV."""
+    with open(COUNTRY_LEGEND, "r") as f:
         reader = csv.reader(f)
         for row in reader:
             if len(row) >= 2 and row[1] == country:
-                country_id = int(row[0])
-                break
-    if country_id is None:
-        raise ValueError(f"Country '{country}' not found in {COUNTRY_LEGEND}")
+                return int(row[0])
+    raise ValueError(f"Country '{country}' not found in {COUNTRY_LEGEND}")
 
-    # read the raster file
+
+def scan_country_extent_and_tiles(country_id):
+    """
+    Find the country bounding box and required MODIS tiles without loading the full
+    global country raster into memory.
+
+    Returns
+    -------
+    required_tiles : list[tuple[int, int]]
+        MODIS (h, v) tiles containing at least one pixel of the country.
+    bbox : tuple[int, int, int, int]
+        (row_start, row_stop, col_start, col_stop) in global MODIS pixel coordinates.
+    profile : dict
+        Rasterio profile from the country raster.
+    """
+    required_tiles = []
+    row_min = None
+    row_max = None
+    col_min = None
+    col_max = None
+
     with rasterio.open(COUNTRY_RASTER) as src:
-        country_data = src.read(1)
         profile = src.profile.copy()
-    
-    # make the mask
-    country_mask = country_data == country_id
+        raster_height = src.height
+        raster_width = src.width
 
-    return country_mask, profile
+        for itile_y in range(ntiles_y):
+            for itile_x in range(ntiles_x):
+                row0 = itile_y * npixels_per_tile_y
+                col0 = itile_x * npixels_per_tile_x
 
-def crop_map_to_country(map_to_crop, country_mask, profile):
-    '''Crops a global map to the specified country using the country mask.'''
-    rows = np.where(np.any(country_mask, axis=1))[0]
-    cols = np.where(np.any(country_mask, axis=0))[0]
-    if rows.size == 0 or cols.size == 0:
-        return np.zeros((0, 0), dtype=map_to_crop.dtype), profile['transform']
-    row_start, row_stop = rows[0], rows[-1] + 1
-    col_start, col_stop = cols[0], cols[-1] + 1
-    country_map = map_to_crop[row_start:row_stop, col_start:col_stop]
-    output_transform = profile['transform'] * rasterio.Affine.translation(col_start, row_start)
-    return country_map, output_transform
+                if row0 >= raster_height or col0 >= raster_width:
+                    continue
 
-def read_lat_lon_grids():
-    '''Read the lat and lon grids for the global MODIS grid.'''
-    lat_filename = '../data_supporting/modis500_latlon/lat_modis500.tif'
-    lon_filename = '../data_supporting/modis500_latlon/lon_modis500.tif'
+                height = min(npixels_per_tile_y, raster_height - row0)
+                width = min(npixels_per_tile_x, raster_width - col0)
+                window = Window(col0, row0, width, height)
+
+                tile_country_ids = src.read(1, window=window)
+                tile_mask = tile_country_ids == country_id
+
+                if not np.any(tile_mask):
+                    del tile_country_ids, tile_mask
+                    continue
+
+                required_tiles.append((itile_x, itile_y))
+
+                local_rows, local_cols = np.where(tile_mask)
+                abs_row_min = row0 + int(local_rows.min())
+                abs_row_max = row0 + int(local_rows.max())
+                abs_col_min = col0 + int(local_cols.min())
+                abs_col_max = col0 + int(local_cols.max())
+
+                row_min = abs_row_min if row_min is None else min(row_min, abs_row_min)
+                row_max = abs_row_max if row_max is None else max(row_max, abs_row_max)
+                col_min = abs_col_min if col_min is None else min(col_min, abs_col_min)
+                col_max = abs_col_max if col_max is None else max(col_max, abs_col_max)
+
+                del tile_country_ids, tile_mask, local_rows, local_cols
+
+    if row_min is None:
+        raise ValueError(f"Country '{country}' has no pixels in {COUNTRY_RASTER}")
+
+    # Stop indices are exclusive.
+    bbox = (row_min, row_max + 1, col_min, col_max + 1)
+    return required_tiles, bbox, profile
+
+
+def read_country_mask_crop(country_id, bbox):
+    """Read only the cropped country mask window."""
+    row_start, row_stop, col_start, col_stop = bbox
+    window = Window(col_start, row_start, col_stop - col_start, row_stop - row_start)
+
+    with rasterio.open(COUNTRY_RASTER) as src:
+        country_ids_crop = src.read(1, window=window)
+
+    country_mask_crop = country_ids_crop == country_id
+    del country_ids_crop
+    return country_mask_crop
+
+
+def output_transform_for_bbox(profile, bbox):
+    """Return the affine transform for a cropped bbox."""
+    row_start, _, col_start, _ = bbox
+    return profile["transform"] * rasterio.Affine.translation(col_start, row_start)
+
+
+def construct_country_crop_map(year, startday, required_tiles, bbox, country_mask_crop, quantity):
+    """
+    Construct only the cropped country-sized map, not the full global map.
+
+    The returned array has the country bounding-box shape. Pixels outside the country
+    are set to NaN.
+    """
+    row_start, row_stop, col_start, col_stop = bbox
+    out_height = row_stop - row_start
+    out_width = col_stop - col_start
+
+    country_map = np.full((out_height, out_width), np.nan, dtype=np.float32)
+    files_by_tile = get_files_by_tile(year, startday, quantity)
+
+    missing_tiles = []
+
+    for itile_x, itile_y in required_tiles:
+        filename = files_by_tile.get((itile_x, itile_y))
+        if filename is None:
+            missing_tiles.append((itile_x, itile_y))
+            continue
+
+        tile_row_start = itile_y * npixels_per_tile_y
+        tile_row_stop = tile_row_start + npixels_per_tile_y
+        tile_col_start = itile_x * npixels_per_tile_x
+        tile_col_stop = tile_col_start + npixels_per_tile_x
+
+        # Overlap between this tile and the country bbox in global coordinates.
+        overlap_row_start = max(row_start, tile_row_start)
+        overlap_row_stop = min(row_stop, tile_row_stop)
+        overlap_col_start = max(col_start, tile_col_start)
+        overlap_col_stop = min(col_stop, tile_col_stop)
+
+        if overlap_row_start >= overlap_row_stop or overlap_col_start >= overlap_col_stop:
+            continue
+
+        data_tile = read_data_from_hdf(filename, quantity)
+
+        tile_rows = slice(overlap_row_start - tile_row_start, overlap_row_stop - tile_row_start)
+        tile_cols = slice(overlap_col_start - tile_col_start, overlap_col_stop - tile_col_start)
+        out_rows = slice(overlap_row_start - row_start, overlap_row_stop - row_start)
+        out_cols = slice(overlap_col_start - col_start, overlap_col_stop - col_start)
+
+        country_map[out_rows, out_cols] = data_tile[tile_rows, tile_cols]
+
+        del data_tile
+        gc.collect()
+
+    if missing_tiles:
+        _print(f"Warning: {quantity} missing {len(missing_tiles)} required tile(s): {missing_tiles}")
+
+    # Mask in place to avoid allocating another country-sized array.
+    country_map[~country_mask_crop] = np.nan
+    return country_map
+
+
+def read_lat_lon_crops(bbox, country_mask_crop):
+    """Read only cropped latitude and longitude windows, then mask outside country."""
+    row_start, row_stop, col_start, col_stop = bbox
+    window = Window(col_start, row_start, col_stop - col_start, row_stop - row_start)
+
+    lat_filename = f"{main_dir}data_supporting/modis500_latlon/lat_modis500.tif"
+    lon_filename = f"{main_dir}data_supporting/modis500_latlon/lon_modis500.tif"
+
     with rasterio.open(lat_filename) as src:
-        lat_grid = src.read(1)
+        lat_grid_cropped = src.read(1, window=window).astype(np.float32, copy=False)
+    lat_grid_cropped[~country_mask_crop] = np.nan
+
     with rasterio.open(lon_filename) as src:
-        lon_grid = src.read(1)
-    return lat_grid, lon_grid
+        lon_grid_cropped = src.read(1, window=window).astype(np.float32, copy=False)
+    lon_grid_cropped[~country_mask_crop] = np.nan
 
-def main():
-    '''Main function for extracting the country data.'''
+    return lat_grid_cropped, lon_grid_cropped
 
-    # make the output directory if it doesn't exist
-    _print(f"Creating output directory at {output_directory_main} if it doesn't exist.")
-    outputdir = f'{output_directory_main}{country}/'
-    os.makedirs(outputdir, exist_ok=True)
 
-    # get list of the first days in all 8-day periods in the year
-    _print("Calculating start days for 8-day periods.")
+def write_geotiff(output_path, array, profile, transform):
+    """Write a single-band GeoTIFF for a cropped country map."""
+    output_profile = profile.copy()
+    output_profile.update(
+        count=1,
+        height=array.shape[0],
+        width=array.shape[1],
+        transform=transform,
+        dtype="float32",
+        nodata=np.nan,
+        compress="deflate",
+    )
+
+    with rasterio.open(output_path, "w", **output_profile) as dst:
+        dst.write(array.astype(np.float32, copy=False), 1)
+
+
+def write_country_csv(
+    output_csv_path,
+    lat_grid_cropped,
+    lon_grid_cropped,
+    landcover_cropped,
+    npp_cropped,
+    lai_cropped,
+    fpar_cropped,
+):
+    """Write only valid country pixels to CSV."""
+    lat = lat_grid_cropped.ravel()
+    lon = lon_grid_cropped.ravel()
+    landcover = landcover_cropped.ravel()
+    npp = npp_cropped.ravel()
+    lai = lai_cropped.ravel()
+    fpar = fpar_cropped.ravel()
+
+    valid = (
+        ~np.isnan(lat)
+        & ~np.isnan(lon)
+        & ~np.isnan(landcover)
+        & ~np.isnan(npp)
+        & ~np.isnan(lai)
+        & ~np.isnan(fpar)
+    )
+
+    df = pd.DataFrame(
+        {
+            "lat": lat[valid],
+            "lon": lon[valid],
+            "landcover": landcover[valid],
+            "npp": npp[valid],
+            "lai": lai[valid],
+            "fpar": fpar[valid],
+        }
+    )
+    df.to_csv(output_csv_path, index=False)
+
+    del df, valid, lat, lon, landcover, npp, lai, fpar
+    gc.collect()
+
+
+def get_startdays():
+    """Return first days of 8-day MODIS periods, matching the original script."""
     startdays = []
     for i in range(100):
-        if i * 8 + 1 > 365:
+        startday = i * 8 + 1
+        if startday > 365:
             break
-        startdays.append(i * 8 + 1)
+        startdays.append(startday)
+    return startdays
 
-    # construct the country mask
-    _print(f"Constructing country mask for {country}.")
-    country_mask, profile = make_country_mask()
 
-    # work out which tiles need to be read based on the country mask
-    # so not all tiles need to be read
-    _print(f"Determining required tiles for {country}.")
-    required_tiles = get_required_tiles(country_mask)
+# --------------------------------------------------------------------------------
+# Main workflow
+
+def main():
+    _print(f"Creating output directory at {output_directory_main} if it doesn't exist.")
+    outputdir = f"{output_directory_main}{country}/"
+    os.makedirs(outputdir, exist_ok=True)
+
+    _print("Calculating start days for 8-day periods.")
+    startdays = get_startdays()
+
+    _print(f"Looking up country ID for {country}.")
+    country_id = get_country_id()
+
+    _print(f"Scanning country raster to find bbox and required MODIS tiles for {country}.")
+    required_tiles, bbox, profile = scan_country_extent_and_tiles(country_id)
+    row_start, row_stop, col_start, col_stop = bbox
+    output_transform = output_transform_for_bbox(profile, bbox)
+
     print(f"Required tiles for {country}: {required_tiles}")
+    print(
+        f"Country bbox for {country}: rows {row_start}:{row_stop}, "
+        f"cols {col_start}:{col_stop}, shape {(row_stop - row_start, col_stop - col_start)}"
+    )
 
-    # read the lat and lon grid
-    _print("Reading latitude and longitude grids for the global grid and making it just for country")
-    lat_grid, lon_grid = read_lat_lon_grids()
-    lat_grid_masked = np.where(country_mask, lat_grid, np.nan)
-    lon_grid_masked = np.where(country_mask, lon_grid, np.nan)
-    lat_grid_cropped, _ = crop_map_to_country(lat_grid_masked, country_mask, profile)
-    lon_grid_cropped, _ = crop_map_to_country(lon_grid_masked, country_mask, profile)
-    
-    # loop over years to consider (start at 2003 since that's when all data is available)
-    for year in range(2003, 2024):
+    _print("Reading cropped country mask.")
+    country_mask_crop = read_country_mask_crop(country_id, bbox)
+
+    _print("Reading cropped latitude and longitude grids.")
+    lat_grid_cropped, lon_grid_cropped = read_lat_lon_crops(bbox, country_mask_crop)
+
+    for year in range(yearstart, yearend + 1):
         _print(f"Processing year {year}.")
 
-        # get the land cover for this year
-        _print(f"Reading land cover data for year {year}.")
-        global_map_landcover = construct_global_map(year, 1, required_tiles, 'LandCover')
-        country_mask_landcover = np.where(country_mask, global_map_landcover, np.nan)
-        country_mask_landcover_cropped, output_transform = crop_map_to_country(country_mask_landcover, country_mask, profile)
+        _print(f"Constructing cropped land cover map for {country}, year {year}.")
+        landcover_cropped = construct_country_crop_map(
+            year=year,
+            startday=1,
+            required_tiles=required_tiles,
+            bbox=bbox,
+            country_mask_crop=country_mask_crop,
+            quantity="LandCover",
+        )
 
-        # save the cropped country mask as a GeoTIFF using the source country profile
         _print(f"Saving country land cover map for {country}, year {year} as GeoTIFF.")
         output_path = os.path.join(outputdir, f"{country}_LandCover_{year}.tif")
-        output_profile = profile.copy()
-        output_profile.update(
-            count=1,
-            height=country_mask_landcover_cropped.shape[0],
-            width=country_mask_landcover_cropped.shape[1],
-            transform=output_transform,
-            dtype=country_mask_landcover_cropped.dtype,
-            nodata=np.nan
-        )
-        with rasterio.open(output_path, 'w', **output_profile) as dst:
-            dst.write(country_mask_landcover_cropped, 1)
+        write_geotiff(output_path, landcover_cropped, profile, output_transform)
 
-        # loop over the 8-day periods
         for startday in startdays:
             _print(f"Processing 8-day period starting on day {startday}.")
 
-            # construct the global map for this period
-            _print(f"Constructing maps.")
-            global_map_npp = construct_global_map(year, startday, required_tiles, 'NPP')
-            global_map_lai = construct_global_map(year, startday, required_tiles, 'LAI')
-            global_map_fpar = construct_global_map(year, startday, required_tiles, 'FPAR')
+            _print("Constructing cropped NPP map.")
+            npp_cropped = construct_country_crop_map(
+                year=year,
+                startday=startday,
+                required_tiles=required_tiles,
+                bbox=bbox,
+                country_mask_crop=country_mask_crop,
+                quantity="NPP",
+            )
 
-            # mask the global map to get the country map
-            _print(f"Masking maps to get country maps.")
-            country_map_npp = np.where(country_mask, global_map_npp, np.nan)
-            country_map_lai = np.where(country_mask, global_map_lai, np.nan)
-            country_map_fpar = np.where(country_mask, global_map_fpar, np.nan)
+            _print("Constructing cropped LAI map.")
+            lai_cropped = construct_country_crop_map(
+                year=year,
+                startday=startday,
+                required_tiles=required_tiles,
+                bbox=bbox,
+                country_mask_crop=country_mask_crop,
+                quantity="LAI",
+            )
 
-            # crop the country map to the bounding box of the country
-            _print(f"Cropping country maps.")
-            country_map_npp_cropped, output_transform = crop_map_to_country(country_map_npp, country_mask, profile)
-            country_map_lai_cropped, _ = crop_map_to_country(country_map_lai, country_mask, profile)
-            country_map_fpar_cropped, _ = crop_map_to_country(country_map_fpar, country_mask, profile)
-
-            # save the cropped country maps as GeoTIFFs using the source country profile
-            output_profile = profile.copy()
-            output_profile.update(
-                count=1,
-                transform=output_transform,
-                dtype=country_map_npp_cropped.dtype,
-                nodata=np.nan
+            _print("Constructing cropped FPAR map.")
+            fpar_cropped = construct_country_crop_map(
+                year=year,
+                startday=startday,
+                required_tiles=required_tiles,
+                bbox=bbox,
+                country_mask_crop=country_mask_crop,
+                quantity="FPAR",
             )
 
             _print(f"Saving country NPP map for {country}, year {year}, start day {startday} as GeoTIFF.")
             output_path = os.path.join(outputdir, f"{country}_NPP_{year}_{startday:03d}.tif")
-            output_profile.update(
-                height=country_map_npp_cropped.shape[0],
-                width=country_map_npp_cropped.shape[1],
-            )
-            with rasterio.open(output_path, 'w', **output_profile) as dst:
-                dst.write(country_map_npp_cropped, 1)
+            write_geotiff(output_path, npp_cropped, profile, output_transform)
 
             _print(f"Saving country LAI map for {country}, year {year}, start day {startday} as GeoTIFF.")
             output_path = os.path.join(outputdir, f"{country}_LAI_{year}_{startday:03d}.tif")
-            output_profile.update(
-                height=country_map_lai_cropped.shape[0],
-                width=country_map_lai_cropped.shape[1],
-                dtype=country_map_lai_cropped.dtype,
-            )
-            with rasterio.open(output_path, 'w', **output_profile) as dst:
-                dst.write(country_map_lai_cropped, 1)
+            write_geotiff(output_path, lai_cropped, profile, output_transform)
 
             _print(f"Saving country FPAR map for {country}, year {year}, start day {startday} as GeoTIFF.")
             output_path = os.path.join(outputdir, f"{country}_FPAR_{year}_{startday:03d}.tif")
-            output_profile.update(
-                height=country_map_fpar_cropped.shape[0],
-                width=country_map_fpar_cropped.shape[1],
-                dtype=country_map_fpar_cropped.dtype,
-            )
-            with rasterio.open(output_path, 'w', **output_profile) as dst:
-                dst.write(country_map_fpar_cropped, 1)
+            write_geotiff(output_path, fpar_cropped, profile, output_transform)
 
-            # construct a DataFrame with the values for each pixel and save as CSV 
-            # columns: lat, lon, landcover, npp, lai, fpar
             _print(f"Saving country data for {country}, year {year}, start day {startday} as CSV.")
             output_csv_path = os.path.join(outputdir, f"{country}_data_{year}_{startday:03d}.csv")
-            df = pd.DataFrame({
-                'lat': lat_grid_cropped.flatten(),
-                'lon': lon_grid_cropped.flatten(),
-                'landcover': country_mask_landcover_cropped.flatten(),
-                'npp': country_map_npp_cropped.flatten(),
-                'lai': country_map_lai_cropped.flatten(),
-                'fpar': country_map_fpar_cropped.flatten(),
-            })
-            df = df.dropna(how='any')
-            df.to_csv(output_csv_path, index=False)
+            write_country_csv(
+                output_csv_path,
+                lat_grid_cropped,
+                lon_grid_cropped,
+                landcover_cropped,
+                npp_cropped,
+                lai_cropped,
+                fpar_cropped,
+            )
 
+            del npp_cropped, lai_cropped, fpar_cropped
+            gc.collect()
 
+        del landcover_cropped
+        gc.collect()
+
+    del country_mask_crop, lat_grid_cropped, lon_grid_cropped
+    gc.collect()
+
+    _print("Finished.")
 
 
 if __name__ == "__main__":
     main()
-
-
-
