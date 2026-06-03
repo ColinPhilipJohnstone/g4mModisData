@@ -13,7 +13,7 @@ Usage:
   python extract_country_maps_memory_safe.py --country <CountryName> --yearstart <StartYear> --yearend <EndYear> [--onjupyter]
 
 Example:
-  python extract_country_maps_memory_safe.py --country Kenya --yearstart 2003 --yearend 2010
+  python extract_country_maps.py --country Kenya --yearstart 2003 --yearend 2024
 '''
 
 import argparse
@@ -156,7 +156,7 @@ def get_files_by_tile(year, startday, quantity):
 def get_dataset_name(quantity):
     """Return the HDF dataset name for a MODIS quantity."""
     if quantity == "LandCover":
-        return "LC_Type1"
+        return "LC_Type2"
     if quantity == "NPP":
         return "Gpp_500m"
     if quantity == "LAI":
